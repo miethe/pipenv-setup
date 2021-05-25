@@ -13,9 +13,16 @@ from vistir.compat import Path
 from pipenv_setup import setup_parser
 from pipenv_setup.setup_parser import get_setup_call_node, get_kw_list_node
 
+def update_cfg(dependency_arguments, filename):
+    config = configparser.ConfigParser()
+    config.read(filename)
+
+    if 'options' not in config:
+        raise ValueError("No options section found in setup.cfg")
+
 def update_setup(
-    dependency_arguments, filename, dev=False
-):  # type: (Any, Path, bool) -> None
+    dependency_arguments, filename, dev=False, cfg=False
+):  # type: (Any, Path, bool, bool) -> None
     """
     Clear install_requires and dependency_links argument and fill new ones. Format the code.
 
@@ -24,12 +31,6 @@ def update_setup(
     :param dev: update extras_require or not
     :raise ValueError: when setup.py is not recognized (malformed)
     """
-    with open(str(filename), "rb") as setup_file:
-        setup_bytes = setup_file.read()
-    setup_text = setup_bytes.decode(encoding="utf-8")
-    root_node = ast.parse(setup_text)
-    setup_lines = setup_text.splitlines()
-
     requirement_flags = {
         "install_requires_lineno":-1,
         "install_requires_col_offset":-1,
@@ -41,12 +42,19 @@ def update_setup(
         "setup_call_col_offset":-1
     }
 
+    if cfg:
+        update_cfg(dependency_arguments, filename)
+
+    with open(str(filename), "rb") as setup_file:
+        setup_bytes = setup_file.read()
+    setup_text = setup_bytes.decode(encoding="utf-8")
+    root_node = ast.parse(setup_text)
+    setup_lines = setup_text.splitlines()
+
+
     requirement_flags = get_setup_flags(root_node, requirement_flags)
-
     setup_lines, setup_bytes = get_setup_lines_bytes(dev, setup_bytes, setup_lines)
-
     root_node = ast.parse("\n".join(setup_lines))
-
     node = get_kw_list_node(root_node, "install_requires")
     requirement_flags = get_requirement_flags(root_node, requirement_flags, node)
 
@@ -64,9 +72,9 @@ def update_keyword_arguments(dependency_arguments, dev, setup_lines, requirement
 
     update_dependency_links(dependency_arguments, setup_lines, requirement_flags)
 
-    update_extras_require(dependency_arguments, dev, setup_lines, requirement_flags)
+    update_extras_requires(dependency_arguments, dev, setup_lines, requirement_flags)
 
-def update_extras_require(dependency_arguments, dev, setup_lines, requirement_flags):
+def update_extras_requires(dependency_arguments, dev, setup_lines, requirement_flags):
     # update extras_requireroot_node = ast.parse("\n".join(setup_lines))
     if len(dependency_arguments["extras_require"]) > 0 and dev:
         if requirement_flags["extras_require_lineno"] == -1:
@@ -101,6 +109,33 @@ def update_extras_require(dependency_arguments, dev, setup_lines, requirement_fl
             str(dependency_arguments["extras_require"])[1:-1] + ",",
         )
 
+def update_keyword_requires(setup_lines, lineno, offset, parameters, added_keyword=None):
+    """
+    Update the specified keyword field, or create it if it doesn't exist.
+
+    Args:
+        setup_lines (list[str]): setup file broken into lines.
+        lineno (int): line number of setup()
+        offset (int): offset of setup()
+        parameters (str): new paramters to add to keyword.
+        added_keyword (str, optional): keyword to add ie: "install_requires". Defaults to None.
+    """
+    if added_keyword:
+        insert_at_lineno_col_offset(
+            setup_lines,
+            lineno,
+            offset + 1,
+            parameters[1:-1]
+        )
+    else:
+        # keyword does not exist, create a new one
+        insert_at_lineno_col_offset(
+            setup_lines,
+            lineno,
+            offset + len("setup("),
+            added_keyword + parameters + ","
+        )
+
 def update_dependency_links(dependency_arguments, setup_lines, requirement_flags):
     if requirement_flags["dependency_links_lineno"] != -1:
         # if dependency_links exists from the start
@@ -121,20 +156,19 @@ def update_dependency_links(dependency_arguments, setup_lines, requirement_flags
 
 def update_install_requires(dependency_arguments, setup_lines, requirement_flags):
     if requirement_flags["install_requires_lineno"] != -1:
-        # if install_requires exists from the start
-        insert_at_lineno_col_offset(
+        update_keyword_requires(
             setup_lines,
             requirement_flags["install_requires_lineno"],
-            requirement_flags["install_requires_col_offset"] + 1,
-            str(dependency_arguments["install_requires"])[1:-1],
+            requirement_flags["install_requires_col_offset"],
+            str(dependency_arguments["install_requires"])
         )
     elif len(dependency_arguments["install_requires"]) > 0:
-        # install_requires does not exist, create a new one
-        insert_at_lineno_col_offset(
+        update_keyword_requires(
             setup_lines,
             requirement_flags["setup_call_lineno"],
-            requirement_flags["setup_call_col_offset"] + len("setup("),
-            "install_requires=" + str(dependency_arguments["install_requires"]) + ",",
+            requirement_flags["setup_call_col_offset"],
+            str(dependency_arguments["install_requires"]),
+            added_keyword="install_requires"
         )
 
 def get_requirement_flags(root_node, requirement_flags, node):
