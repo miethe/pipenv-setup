@@ -56,6 +56,13 @@ def cmd(argv=sys.argv):
     )
 
     sync_parser.add_argument(
+        "-c",
+        "--config",
+        action="store_true",
+        help="sync to setup.cfg instead of setup.py",
+    )
+
+    sync_parser.add_argument(
         "-d",
         "--dev",
         action="store_true",
@@ -197,8 +204,13 @@ def sync(argv):
     pipfile_path, lockfile_path, setup_file_path = required_files = [
         Path("Pipfile"),
         Path("Pipfile.lock"),
-        Path("setup.py"),
     ]
+
+    if argv.config:
+        setup_file_path = Path("setup.cfg")
+    else:
+        setup_file_path = Path("setup.py")
+    required_files.append(setup_file_path)
 
     missing_files = tuple(filter(lambda x: not x.exists(), required_files))
     only_setup_missing = len(missing_files) == 1 and not setup_file_path.exists()
@@ -292,10 +304,10 @@ def sync(argv):
                     )
                 )
 
-        else:  # all files exist. Update setup.py
+        else:  # all files exist. Update setup.py or setup.cfg
             try:
                 setup_updater.update_setup(
-                    dependency_arguments, setup_file_path, argv.dev
+                    dependency_arguments, setup_file_path, argv.dev, argv.config
                 )
             except ValueError as e:
                 fatal_error([str(e), msg_formatter.no_sync_performed()])
