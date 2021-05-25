@@ -2,6 +2,7 @@ import ast
 import codecs
 import sys
 import tokenize
+import configparser
 from io import BytesIO
 from subprocess import Popen, PIPE
 from tokenize import OP
@@ -11,7 +12,6 @@ from vistir.compat import Path
 
 from pipenv_setup import setup_parser
 from pipenv_setup.setup_parser import get_setup_call_node, get_kw_list_node
-
 
 def update_setup(
     dependency_arguments, filename, dev=False
@@ -30,101 +30,69 @@ def update_setup(
     root_node = ast.parse(setup_text)
     setup_lines = setup_text.splitlines()
 
-    setup_call_node = get_setup_call_node(root_node)
-    if setup_call_node is None:
-        raise ValueError("No setup() call found in setup.py")
-    setup_call_lineno, setup_call_col_offset = (
-        setup_call_node.lineno,
-        setup_call_node.col_offset,
-    )
+    requirement_flags = {
+        "install_requires_lineno":-1,
+        "install_requires_col_offset":-1,
+        "dependency_links_lineno":-1,
+        "dependency_links_col_offset":-1,
+        "extras_require_lineno":-1,
+        "extras_require_col_offset":-1,
+        "setup_call_lineno":-1,
+        "setup_call_col_offset":-1
+    }
 
-    install_requires_lineno = -1
-    install_requires_col_offset = -1
-    dependency_links_lineno = -1
-    dependency_links_col_offset = -1
-    extras_require_lineno = -1
-    extras_require_col_offset = -1
+    requirement_flags = get_setup_flags(root_node, requirement_flags)
 
-    for kw in ["install_requires", "dependency_links"]:
-        setup_bytes, setup_lines = clear_kw_list(kw, setup_bytes, setup_lines)
-    if dev:
-        setup_bytes, setup_lines = clear_dev_value(setup_bytes, setup_lines)
+    setup_lines, setup_bytes = get_setup_lines_bytes(dev, setup_bytes, setup_lines)
 
     root_node = ast.parse("\n".join(setup_lines))
 
     node = get_kw_list_node(root_node, "install_requires")
-    if node is not None:
-        install_requires_lineno = node.lineno
-        install_requires_col_offset = node.col_offset
-    node = get_kw_list_node(root_node, "dependency_links")
-    if node is not None:
-        dependency_links_lineno = node.lineno
-        dependency_links_col_offset = node.col_offset
-    extras_require_node = setup_parser.get_extras_require_dict_node(root_node)
-    if extras_require_node is not None:
-        extras_require_lineno = extras_require_node.lineno
-        extras_require_col_offset = extras_require_node.col_offset
+    requirement_flags = get_requirement_flags(root_node, requirement_flags, node)
 
+    update_keyword_arguments(dependency_arguments, dev, setup_lines, requirement_flags)
+
+    f = codecs.open("setup.py", encoding="utf-8", mode="w")
+    f.write("\n".join(setup_lines))
+    f.close()
+
+    format_file(Path("setup.py"))
+
+def update_keyword_arguments(dependency_arguments, dev, setup_lines, requirement_flags):
     # update keyword arguments
-    if install_requires_lineno != -1:
-        # if install_requires exists from the start
-        insert_at_lineno_col_offset(
-            setup_lines,
-            install_requires_lineno,
-            install_requires_col_offset + 1,
-            str(dependency_arguments["install_requires"])[1:-1],
-        )
-    elif len(dependency_arguments["install_requires"]) > 0:
-        # install_requires does not exist, create a new one
-        insert_at_lineno_col_offset(
-            setup_lines,
-            setup_call_lineno,
-            setup_call_col_offset + len("setup("),
-            "install_requires=" + str(dependency_arguments["install_requires"]) + ",",
-        )
+    update_install_requires(dependency_arguments, setup_lines, requirement_flags)
 
-    if dependency_links_lineno != -1:
-        # if dependency_links exists from the start
-        insert_at_lineno_col_offset(
-            setup_lines,
-            dependency_links_lineno,
-            dependency_links_col_offset + 1,
-            str(dependency_arguments["dependency_links"])[1:-1],
-        )
-    elif len(dependency_arguments["dependency_links"]) > 0:
-        # dependency_links does not exist, create a new one
-        insert_at_lineno_col_offset(
-            setup_lines,
-            setup_call_lineno,
-            setup_call_col_offset + len("setup("),
-            "dependency_links=" + str(dependency_arguments["dependency_links"]) + ",",
-        )
+    update_dependency_links(dependency_arguments, setup_lines, requirement_flags)
 
-    # update extras_require
-    root_node = ast.parse("\n".join(setup_lines))
+    update_extras_require(dependency_arguments, dev, setup_lines, requirement_flags)
+
+def update_extras_require(dependency_arguments, dev, setup_lines, requirement_flags):
+    # update extras_requireroot_node = ast.parse("\n".join(setup_lines))
     if len(dependency_arguments["extras_require"]) > 0 and dev:
-        if extras_require_lineno == -1:
+        if requirement_flags["extras_require_lineno"] == -1:
             # extras_require does not exist from the start
             insert_at_lineno_col_offset(
                 setup_lines,
-                setup_call_lineno,
-                setup_call_col_offset + len("setup("),
+                requirement_flags["setup_call_lineno"],
+                requirement_flags["setup_call_col_offset"]  + len("setup("),
                 'extras_require = {"dev": []},',
             )
-            extras_require_lineno = setup_call_lineno
-            extras_require_col_offset = setup_call_col_offset + len("setup(")
+            requirement_flags["extras_require_lineno"] = requirement_flags["setup_call_lineno"]
+            requirement_flags["extras_require_col_offset"] = requirement_flags["setup_call_col_offset"]  + len("setup(")
+
             root_node = ast.parse("\n".join(setup_lines))
 
         dev_list_node = setup_parser.get_extras_require_dev_list_node(root_node)
         if dev_list_node is None:
             insert_at_lineno_col_offset(
                 setup_lines,
-                extras_require_lineno,
-                extras_require_col_offset + 1,
+                requirement_flags["extras_require_lineno"],
+                requirement_flags["extras_require_col_offset"] + 1,
                 '"dev": [],',
             )
             root_node = ast.parse("\n".join(setup_lines))
             dev_list_node = setup_parser.get_extras_require_dev_list_node(root_node)
+
         assert dev_list_node is not None
         insert_at_lineno_col_offset(
             setup_lines,
@@ -133,11 +101,72 @@ def update_setup(
             str(dependency_arguments["extras_require"])[1:-1] + ",",
         )
 
-    f = codecs.open("setup.py", encoding="utf-8", mode="w")
-    f.write("\n".join(setup_lines))
-    f.close()
+def update_dependency_links(dependency_arguments, setup_lines, requirement_flags):
+    if requirement_flags["dependency_links_lineno"] != -1:
+        # if dependency_links exists from the start
+        insert_at_lineno_col_offset(
+            setup_lines,
+            requirement_flags["dependency_links_lineno"],
+            requirement_flags["dependency_links_col_offset"] + 1,
+            str(dependency_arguments["dependency_links"])[1:-1],
+        )
+    elif len(dependency_arguments["dependency_links"]) > 0:
+        # dependency_links does not exist, create a new one
+        insert_at_lineno_col_offset(
+            setup_lines,
+            requirement_flags["setup_call_lineno"],
+            requirement_flags["setup_call_col_offset"]  + len("setup("),
+            "dependency_links=" + str(dependency_arguments["dependency_links"]) + ",",
+        )
 
-    format_file(Path("setup.py"))
+def update_install_requires(dependency_arguments, setup_lines, requirement_flags):
+    if requirement_flags["install_requires_lineno"] != -1:
+        # if install_requires exists from the start
+        insert_at_lineno_col_offset(
+            setup_lines,
+            requirement_flags["install_requires_lineno"],
+            requirement_flags["install_requires_col_offset"] + 1,
+            str(dependency_arguments["install_requires"])[1:-1],
+        )
+    elif len(dependency_arguments["install_requires"]) > 0:
+        # install_requires does not exist, create a new one
+        insert_at_lineno_col_offset(
+            setup_lines,
+            requirement_flags["setup_call_lineno"],
+            requirement_flags["setup_call_col_offset"] + len("setup("),
+            "install_requires=" + str(dependency_arguments["install_requires"]) + ",",
+        )
+
+def get_requirement_flags(root_node, requirement_flags, node):
+    if node is not None:
+        requirement_flags["install_requires_lineno"] = node.lineno
+        requirement_flags["install_requires_col_offset"] = node.col_offset
+    node = get_kw_list_node(root_node, "dependency_links")
+    if node is not None:
+        requirement_flags["dependency_links_lineno"] = node.lineno
+        requirement_flags["dependency_links_col_offset"] = node.col_offset
+    extras_require_node = setup_parser.get_extras_require_dict_node(root_node)
+    if extras_require_node is not None:
+        requirement_flags["extras_require_lineno"] = extras_require_node.lineno
+        requirement_flags["extras_require_col_offset"] = extras_require_node.col_offset
+    return requirement_flags
+
+def get_setup_flags(root_node, requirement_flags):
+    setup_call_node = get_setup_call_node(root_node)
+    if setup_call_node is None:
+        raise ValueError("No setup() call found in setup.py")
+    requirement_flags["setup_call_lineno"], requirement_flags["setup_call_col_offset"] = (
+        setup_call_node.lineno,
+        setup_call_node.col_offset,
+    )
+    return requirement_flags
+
+def get_setup_lines_bytes(dev, setup_bytes, setup_lines):
+    for kw in ["install_requires", "dependency_links"]:
+        setup_bytes, setup_lines = clear_kw_list(kw, setup_bytes, setup_lines)
+    if dev:
+        setup_bytes, setup_lines = clear_dev_value(setup_bytes, setup_lines)
+    return setup_lines, setup_bytes
 
 
 def format_file(file):  # type: (Path) -> None
